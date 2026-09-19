@@ -1,0 +1,172 @@
+from flask import Flask, request, jsonify, render_template_string
+import csv
+import os
+from datetime import datetime
+
+app = Flask(__name__)
+
+# 存储最新传感器数据
+latest = {
+    "mcu_temp": 0.0,
+    "light_v": 0.0,
+    "vref": 0.0,
+    "dht_temp": 0.0,
+    "dht_humi": 0.0,
+    "timestamp": ""
+}
+
+# 历史数据（用于图表，保留最近 100 条）
+history = {
+    "timestamps": [],
+    "mcu_temp": [],
+    "light_v": [],
+    "vref": [],
+    "dht_temp": [],
+    "dht_humi": []
+}
+
+@app.route('/upload', methods=['POST'])
+def upload():
+    """接收 STM32 上传的 JSON 数据"""
+    data = request.get_json()
+    if data:
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        data['timestamp'] = now
+        latest.update(data)
+
+        # 保存到 CSV
+        fieldnames = ['timestamp', 'mcu_temp', 'light_v', 'vref', 'dht_temp', 'dht_humi']
+        with open('sensor_data.csv', 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if f.tell() == 0:
+                writer.writeheader()
+            writer.writerow({k: data[k] for k in fieldnames})
+
+        # 更新历史数据（每个列表最多 100 点）
+        for k in ['mcu_temp', 'light_v', 'vref', 'dht_temp', 'dht_humi']:
+            history[k].append(data[k])
+            if len(history[k]) > 100:
+                history[k].pop(0)
+        history['timestamps'].append(now)
+        if len(history['timestamps']) > 100:
+            history['timestamps'].pop(0)
+
+        return jsonify({'status': 'ok'}), 200
+    return jsonify({'error': 'no data'}), 400
+
+@app.route('/api/latest')
+def api_latest():
+    """返回最新一条数据"""
+    return jsonify(latest)
+
+@app.route('/api/history')
+def api_history():
+    """返回历史数据（用于图表）"""
+    return jsonify(history)
+
+@app.route('/')
+def index():
+    """实时仪表盘（带 ECharts 图表）"""
+    return render_template_string(HTML_PAGE)
+
+HTML_PAGE = '''
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>STM32 Sensor Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<style>
+  body{background:#222;color:#ddd;font-family:Arial;margin:20px}
+  .card{background:#333;border-radius:8px;padding:15px;margin:10px 0}
+  .val{font-size:28px;color:#0f0}
+  #clock{font-size:16px;color:#aaa;margin-top:20px}
+  .chart-box{background:#1a1a1a;border-radius:8px;padding:10px;margin:20px auto;max-width:900px}
+</style></head><body>
+<h1>STM32 Sensor Monitor (Flask)</h1>
+<div class=card>MCU Temp: <span id="mcu_temp" class="val">--</span> °C</div>
+<div class=card>Light: <span id="light_v" class="val">--</span> V</div>
+<div class=card>VREF: <span id="vref" class="val">--</span> V</div>
+<div class=card>DHT Temp: <span id="dht_temp" class="val">--</span> °C</div>
+<div class=card>DHT Humidity: <span id="dht_humi" class="val">--</span> %</div>
+<div id=clock>Time: --</div>
+
+<div class="chart-box" id="chart_temp" style="height:300px"></div>
+<div class="chart-box" id="chart_light" style="height:300px"></div>
+<div class="chart-box" id="chart_dht" style="height:300px"></div>
+
+<script>
+// ---- 卡片更新与时钟 ----
+function updateCards(){
+  fetch('/api/latest')
+    .then(r=>r.json())
+    .then(d=>{
+      document.getElementById('mcu_temp').textContent=d.mcu_temp.toFixed(2);
+      document.getElementById('light_v').textContent=d.light_v.toFixed(3);
+      document.getElementById('vref').textContent=d.vref.toFixed(3);
+      document.getElementById('dht_temp').textContent=d.dht_temp.toFixed(1);
+      document.getElementById('dht_humi').textContent=d.dht_humi.toFixed(1);
+    });
+}
+function updateClock(){
+  document.getElementById('clock').textContent='Time: '+new Date().toLocaleTimeString();
+}
+setInterval(updateCards,1000);
+setInterval(updateClock,1000);
+updateCards(); updateClock();
+
+// ---- ECharts 图表 ----
+function createChart(domId, title, seriesOpts){
+  var chart=echarts.init(document.getElementById(domId));
+  chart.setOption({
+    backgroundColor:'#1a1a1a',
+    title:{text:title, left:'center', textStyle:{color:'#ddd', fontSize:14}},
+    tooltip:{trigger:'axis'},
+    legend:{bottom:0, textStyle:{color:'#ddd'}},
+    grid:{top:30,left:60,right:40,bottom:50},
+    xAxis:{type:'category', data:[], axisLabel:{color:'#ddd'}},
+    yAxis:{type:'value', axisLabel:{color:'#ddd'}},
+    series:seriesOpts
+  });
+  return chart;
+}
+
+var tempChart=createChart('chart_temp','MCU Temperature (°C)',[
+  {name:'MCU Temp',type:'line',data:[],smooth:true,
+   lineStyle:{color:'#ff0'},itemStyle:{color:'#ff0'}}
+]);
+var lightChart=createChart('chart_light','Light Voltage (V)',[
+  {name:'Light',type:'line',data:[],smooth:true,
+   lineStyle:{color:'#0ff'},itemStyle:{color:'#0ff'}}
+]);
+var dhtChart=createChart('chart_dht','DHT11 Temperature & Humidity',[
+  {name:'DHT Temp (°C)',type:'line',data:[],smooth:true,
+   lineStyle:{color:'#f80'},itemStyle:{color:'#f80'}},
+  {name:'DHT Humidity (%)',type:'line',data:[],smooth:true,
+   lineStyle:{color:'#0f0'},itemStyle:{color:'#0f0'}}
+]);
+
+function updateCharts(){
+  fetch('/api/history')
+    .then(r=>r.json())
+    .then(h=>{
+      // 更新时间轴
+      var labels=h.timestamps.map(function(t){return t.slice(-8);}); // 只显示时分秒
+      tempChart.setOption({xAxis:{data:labels}});
+      lightChart.setOption({xAxis:{data:labels}});
+      dhtChart.setOption({xAxis:{data:labels}});
+
+      // 更新数据
+      tempChart.setOption({series:[{data:h.mcu_temp}]});
+      lightChart.setOption({series:[{data:h.light_v}]});
+      dhtChart.setOption({series:[
+        {data:h.dht_temp},
+        {data:h.dht_humi}
+      ]});
+    });
+}
+setInterval(updateCharts,1000);
+updateCharts();
+</script></body></html>
+'''
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)
