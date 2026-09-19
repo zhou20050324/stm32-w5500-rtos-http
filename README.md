@@ -41,5 +41,5 @@ Python Flask 接收数据后自动添加时间戳并存入CSV 文件；前端集
 
 ## 使用说明
 1. 使用Keil打开`Project.uvprojx`编译下载固件
-2. 运行Python Flask服务
+2. 打开Python文件夹，运行Python编写的flask脚本 运行Flask服务
 3. 设备上电，接入局域网，浏览器访问Web页面查看传感器实时数据
